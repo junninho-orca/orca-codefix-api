@@ -30,12 +30,26 @@ import argparse
 import base64
 import json
 import os
+import pathlib
 import sys
 import urllib.error
 import urllib.request
 
 BASE = "https://api.orcasecurity.io"
 APP = "https://app.orcasecurity.io"
+
+
+def load_dotenv() -> None:
+    """Load a .env sitting next to this script. Real env vars win over the file."""
+    path = pathlib.Path(__file__).resolve().with_name(".env")
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
 def call(path: str, body: dict | None = None, expect: int = 200) -> dict:
@@ -85,6 +99,7 @@ def main() -> None:
     ap.add_argument("--create-pr", action="store_true", help="open the PR (writes to the repo)")
     args = ap.parse_args()
 
+    load_dotenv()
     if not os.environ.get("ORCA_AUTH"):
         sys.exit('ORCA_AUTH is unset — e.g. export ORCA_AUTH="Token $ORCA_API_TOKEN"')
 

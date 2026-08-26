@@ -14,7 +14,7 @@ the live API.
 ## Usage
 
 ```bash
-export ORCA_AUTH="Token $ORCA_API_TOKEN"
+cp .env.example .env      # then fill in ORCA_AUTH
 
 # generate a fix and print it, without touching the repo
 ./orca_codefix.py orca-1596292
@@ -24,6 +24,10 @@ export ORCA_AUTH="Token $ORCA_API_TOKEN"
 ```
 
 Python 3.9+, standard library only.
+
+Credentials are read from a `.env` beside the script. Real environment variables
+take precedence, so `ORCA_AUTH=... ./orca_codefix.py ...` overrides the file for a
+one-off run.
 
 `--repo-context-id` skips the step 1 lookup if you already know the repository
 context, saving a round trip.

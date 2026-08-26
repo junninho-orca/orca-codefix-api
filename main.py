@@ -108,6 +108,17 @@ def process_alert(alert_id: str, create_pr: bool) -> dict:
 
     try:
         result = orca_codefix.remediate(alert_id, create_pr=create_pr)
+    except orca_codefix.NoCodeOrigin as exc:
+        # Expected and common once CSPM alerts flow in: the resource was never
+        # deployed from IaC Orca can see, so there is no code to patch. Logged at
+        # INFO, because filling the logs with errors for normal outcomes buries
+        # the real ones.
+        result = {"alert_id": alert_id, "status": "skipped_no_code_origin", "detail": str(exc)}
+        log.info(
+            "%s skipped: no code origin",
+            alert_id,
+            extra={"context": {"alert_id": alert_id, "status": "skipped_no_code_origin"}},
+        )
     except orca_codefix.OrcaError as exc:
         result = {
             "alert_id": alert_id,
@@ -142,7 +153,10 @@ def process_alert(alert_id: str, create_pr: bool) -> dict:
         )
 
     result["duration_seconds"] = round(time.monotonic() - started, 1)
-    if _DEDUPE_WINDOW > 0 and result.get("status") != "error":
+    # Only remember outcomes worth not repeating. An error or a missing code
+    # origin may both resolve later — a permission grant, or the next IaC scan —
+    # and neither spent an AI metering unit, so replaying them is cheap.
+    if _DEDUPE_WINDOW > 0 and result.get("status") not in ("error", "skipped_no_code_origin"):
         _remember(alert_id, result)
     return result
 

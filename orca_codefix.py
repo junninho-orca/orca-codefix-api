@@ -119,8 +119,32 @@ def call(path: str, body: dict | None = None, expect: int = 200, auth: str | Non
     return json.loads(raw or b"null")
 
 
-def lookup_repo_context(alert_id: str, auth: str | None = None) -> str:
-    """The repository_context_id is just the alert's CodeRepository asset Id."""
+class NoCodeOrigin(OrcaError):
+    """The alert doesn't map to any code, so there is nothing to fix.
+
+    A normal outcome, not a fault: most CSPM alerts describe resources that were
+    never provisioned from IaC Orca can see. Distinct from OrcaError so the
+    webhook can report it as a skip rather than an error.
+    """
+
+
+def resolve_target(alert_id: str, auth: str | None = None) -> tuple[str, str]:
+    """Find the repository to patch, and which remediation skill applies.
+
+    Returns (repository_context_id, skill) where skill is "sast" or "c2d".
+
+    Two shapes of alert reach code by different routes, and the alert's own asset
+    type is what distinguishes them — not its category, of which CSPM alone has
+    hundreds:
+
+      asset IS a CodeRepository   the finding is in the repo Orca scanned, so the
+                                  repo is the asset itself             -> sast
+      asset is a cloud resource   the finding is in the IaC that deployed it, so
+                                  the repo comes from its code origin  -> c2d
+
+    Anything the second route can't resolve has no code origin and is skipped
+    before step 2, so it costs no AI metering unit.
+    """
     body = call(
         "/api/serving-layer/query",
         {
@@ -135,15 +159,88 @@ def lookup_repo_context(alert_id: str, auth: str | None = None) -> str:
         auth=auth,
     )
     try:
-        return body["data"][0]["data"]["Inventory"]["data"]["Id"]["value"]
+        inventory = body["data"][0]["data"]["Inventory"]
     except (KeyError, IndexError, TypeError):
-        raise OrcaError(f"{alert_id} has no code repository attached") from None
+        raise NoCodeOrigin(f"{alert_id} has no asset attached") from None
+
+    # A CodeRepository asset carries the repository context id directly, as its
+    # Id field. Cloud resources have no such field, which is the tell.
+    if inventory.get("type") == "CodeRepository":
+        try:
+            return inventory["data"]["Id"]["value"], "sast"
+        except (KeyError, TypeError):
+            raise NoCodeOrigin(f"{alert_id}: code repository asset has no Id") from None
+
+    asset_id = inventory.get("id")
+    if not asset_id:
+        raise NoCodeOrigin(f"{alert_id}: asset has no id to trace to code")
+    return lookup_code_origin(alert_id, asset_id, auth), "c2d"
 
 
-def generate_fix(alert_id: str, repo_context_id: str, auth: str | None = None) -> dict:
-    """Step 2. Synchronous, 13-24s, non-deterministic, costs one AI metering unit."""
+def lookup_code_origin(alert_id: str, asset_id: str, auth: str | None = None) -> str:
+    """Trace a cloud asset back to the repository whose IaC deployed it.
+
+    Asks for the CodeOrigin objects whose Inventories include this asset, and
+    takes the CodeRepository hanging off the first one.
+    """
+    body = call(
+        "/api/serving-layer/query",
+        {
+            "query": {
+                "models": ["CodeOrigin"],
+                "type": "object_set",
+                "with": {
+                    "models": ["Inventory"],
+                    "type": "object_set",
+                    "keys": ["Inventories"],
+                    "operator": "has",
+                    "with": {
+                        "keys": ["base"],
+                        "models": ["base"],
+                        "type": "object",
+                        "operator": "has",
+                        "with": {
+                            "key": "id",
+                            "values": [asset_id],
+                            "type": "uuid",
+                            "operator": "in",
+                        },
+                    },
+                },
+            },
+            "additional_models[]": ["CodeRepository"],
+            "get_results_and_count": False,
+            "full_graph_fetch": {"enabled": True},
+        },
+        auth=auth,
+    )
+    try:
+        return body["data"][0]["data"]["CodeRepository"]["data"]["Id"]["value"]
+    except (KeyError, IndexError, TypeError):
+        raise NoCodeOrigin(
+            f"{alert_id}: asset has no code origin Orca can trace, so there is no "
+            f"IaC to patch"
+        ) from None
+
+
+def lookup_repo_context(alert_id: str, auth: str | None = None) -> str:
+    """Back-compat wrapper: the repository context id alone."""
+    return resolve_target(alert_id, auth)[0]
+
+
+def generate_fix(
+    alert_id: str, repo_context_id: str, auth: str | None = None, skill: str = "sast"
+) -> dict:
+    """Step 2. Synchronous, 13-24s, non-deterministic, costs one AI metering unit.
+
+    `skill` picks the endpoint: "sast" for a finding in scanned source, "c2d"
+    (code-to-cloud) for a cloud misconfiguration traced back to its IaC. The two
+    take the same request and return the same response shape.
+    """
+    if skill not in ("sast", "c2d"):
+        raise OrcaError(f"unknown remediation skill {skill!r}")
     return call(
-        "/api/ai-core/skills/code_remediation/sast",
+        f"/api/ai-core/skills/code_remediation/{skill}",
         {
             "target_schema": "serving-layer",
             "alert_id": alert_id,
@@ -177,19 +274,29 @@ def remediate(
     create_pr: bool = False,
     repo_context_id: str | None = None,
     auth: str | None = None,
+    self_skill: str | None = None,
 ) -> dict:
     """Run the whole flow for one alert and describe what happened.
 
     Returns a dict with `status` in: skipped_false_positive, skipped_no_code_fix,
-    generated (fix produced, PR not requested), pr_opened.
+    generated (fix produced, PR not requested), pr_opened. A NoCodeOrigin is left
+    to the caller, which knows whether to treat it as a skip or an error.
+
+    `self_skill` only applies alongside repo_context_id, where the asset that
+    would otherwise select the skill was never looked up.
     """
     auth = auth or auth_header()
-    ctx = repo_context_id or lookup_repo_context(alert_id, auth)
-    fix = generate_fix(alert_id, ctx, auth)
+    if repo_context_id:
+        # Caller supplied the repo, so the skill can't be inferred from the asset.
+        ctx, skill = repo_context_id, self_skill or "sast"
+    else:
+        ctx, skill = resolve_target(alert_id, auth)
+    fix = generate_fix(alert_id, ctx, auth, skill=skill)
 
     result = {
         "alert_id": alert_id,
         "repository_context_id": ctx,
+        "skill": skill,
         "file_path": fix.get("file_path"),
         "remediation_type": fix.get("remediation_type"),
         "is_false_positive": bool(fix.get("is_false_positive")),
@@ -214,16 +321,25 @@ def main() -> None:
     )
     ap.add_argument("alert_id", help="e.g. orca-1596292")
     ap.add_argument("--repo-context-id", help="skip the step 1 lookup")
+    ap.add_argument(
+        "--skill",
+        choices=("sast", "c2d"),
+        help="remediation skill; inferred from the alert's asset unless "
+        "--repo-context-id is given",
+    )
     ap.add_argument("--create-pr", action="store_true", help="open the PR (writes to the repo)")
     args = ap.parse_args()
 
     load_dotenv()
     try:
         auth = auth_header()
-        ctx = args.repo_context_id or lookup_repo_context(args.alert_id, auth)
-        print(f"repository_context_id: {ctx}", file=sys.stderr)
+        if args.repo_context_id:
+            ctx, skill = args.repo_context_id, args.skill or "sast"
+        else:
+            ctx, skill = resolve_target(args.alert_id, auth)
+        print(f"repository_context_id: {ctx} (skill: {skill})", file=sys.stderr)
 
-        fix = generate_fix(args.alert_id, ctx, auth)
+        fix = generate_fix(args.alert_id, ctx, auth, skill=skill)
         json.dump(fix, sys.stdout, indent=2)
 
         if fix.get("is_false_positive") or fix.get("remediation_type") != "code_fix":

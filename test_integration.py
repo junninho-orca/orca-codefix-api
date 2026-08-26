@@ -56,15 +56,43 @@ class FakeOrca(BaseHTTPRequestHandler):
             return self._send(403, {"detail": "Insufficient permissions"})
 
         if self.path == "/api/serving-layer/query":
+            models = body["query"]["models"]
+
+            # Second-stage lookup: cloud asset -> the repo whose IaC deployed it.
+            if models == ["CodeOrigin"]:
+                asset = body["query"]["with"]["with"]["with"]["values"][0]
+                if asset == "asset-no-origin":
+                    return self._send(200, {"data": []})
+                return self._send(
+                    200,
+                    {"data": [{"data": {"CodeRepository": {"data": {"Id": {"value": "ctx-iac"}}}}}]},
+                )
+
             alert_id = body["query"]["with"]["values"][0]
-            if alert_id == "orca-nocode":
-                return self._send(200, {"data": []})  # not a code alert
+            if alert_id == "orca-noasset":
+                return self._send(200, {"data": []})
             if alert_id == "orca-flaky":
                 return self._send(502, {"error": "bad gateway"})
+
+            # A cloud resource, i.e. a CSPM alert: no Id field, so the repo can
+            # only come from its code origin.
+            if alert_id in ("orca-cspm", "orca-nocode"):
+                asset = "asset-no-origin" if alert_id == "orca-nocode" else "asset-1"
+                return self._send(
+                    200,
+                    {"data": [{"data": {"Inventory": {
+                        "id": asset, "type": "AwsS3Bucket", "data": {"Name": {"value": "b"}}}}}]},
+                )
+
             return self._send(
                 200,
-                {"data": [{"data": {"Inventory": {"data": {"Id": {"value": "ctx-123"}}}}}]},
+                {"data": [{"data": {"Inventory": {
+                    "id": "asset-repo", "type": "CodeRepository",
+                    "data": {"Id": {"value": "ctx-123"}}}}}]},
             )
+
+        if self.path == "/api/ai-core/skills/code_remediation/c2d":
+            return self._send(200, {**FIX, "file_path": "terraform/s3.tf"})
 
         if self.path == "/api/ai-core/skills/code_remediation/sast":
             if body["alert_id"] == "orca-fp":
@@ -73,7 +101,9 @@ class FakeOrca(BaseHTTPRequestHandler):
                 return self._send(200, {**FIX, "remediation_type": "action_steps"})
             return self._send(200, FIX)
 
-        if self.path == "/api/shiftleft/repository_contexts/ctx-123/pull_requests/":
+        if self.path.startswith("/api/shiftleft/repository_contexts/") and self.path.endswith(
+            "/pull_requests/"
+        ):
             return self._send(201, {"url": PR_URL})
 
         self._send(404, {"error": f"unexpected path {self.path}"})
@@ -257,12 +287,12 @@ class WebhookIntegration(unittest.TestCase):
         self.assertEqual(result["status"], "skipped_no_code_fix")
         self.assertEqual(pr_calls(), [])
 
-    def test_alert_with_no_code_repository_errors_without_retrying(self):
+    def test_alert_with_no_code_repository_is_skipped_without_retrying(self):
+        # Not an error: most CSPM alerts describe resources never deployed from
+        # IaC Orca can see, so this is the expected outcome, not a fault.
         resp = self.post({"alert_id": "orca-nocode"})
         self.assertEqual(resp.status_code, 200)  # permanent: do not ask Orca to retry
-        result = resp.get_json()["results"][0]
-        self.assertEqual(result["status"], "error")
-        self.assertFalse(result["retryable"])
+        self.assertEqual(resp.get_json()["results"][0]["status"], "skipped_no_code_origin")
 
     def test_non_code_alert_spends_no_ai_metering_unit(self):
         # The step 1 lookup gates step 2, which is the billable call.
@@ -311,6 +341,59 @@ class WebhookIntegration(unittest.TestCase):
             self.assertEqual(body["not_processed"], ["orca-1596293"])
         finally:
             os.environ.pop("MAX_ALERTS_PER_REQUEST", None)
+
+
+class CodeToCloud(WebhookIntegration):
+    """CSPM alerts: the repo comes from code origin, and the skill is c2d.
+
+    The alert's asset type is what selects the route — not its category, of which
+    CSPM alone has hundreds.
+    """
+
+    def test_cspm_alert_resolves_via_code_origin_and_uses_c2d(self):
+        result = self.post({"alert_id": "orca-cspm"}).get_json()["results"][0]
+        self.assertEqual(result["status"], "pr_opened")
+        self.assertEqual(result["repository_context_id"], "ctx-iac")
+        self.assertEqual(result["skill"], "c2d")
+        self.assertEqual(result["file_path"], "terraform/s3.tf")
+
+    def test_cspm_alert_calls_the_c2d_endpoint_not_sast(self):
+        self.post({"alert_id": "orca-cspm"})
+        paths = [c[0] for c in CALLS if "ai-core" in c[0]]
+        self.assertEqual(paths, ["/api/ai-core/skills/code_remediation/c2d"])
+
+    def test_sast_alert_still_uses_the_sast_endpoint(self):
+        self.post(sample("wrapper"))
+        paths = [c[0] for c in CALLS if "ai-core" in c[0]]
+        self.assertEqual(paths, ["/api/ai-core/skills/code_remediation/sast"])
+        self.assertEqual(CALLS[-1][0], "/api/shiftleft/repository_contexts/ctx-123/pull_requests/")
+
+    def test_pr_opens_against_the_iac_repo_for_cspm(self):
+        self.post({"alert_id": "orca-cspm"})
+        self.assertEqual(
+            pr_calls()[-1][0], "/api/shiftleft/repository_contexts/ctx-iac/pull_requests/"
+        )
+
+    def test_asset_without_code_origin_is_skipped_not_errored(self):
+        # The common CSPM case: nothing was deployed from IaC Orca can see.
+        resp = self.post({"alert_id": "orca-nocode"})
+        self.assertEqual(resp.status_code, 200)
+        result = resp.get_json()["results"][0]
+        self.assertEqual(result["status"], "skipped_no_code_origin")
+
+    def test_skip_costs_no_ai_metering_unit(self):
+        self.post({"alert_id": "orca-nocode"})
+        self.assertEqual(ai_calls(), [])
+
+    def test_alert_with_no_asset_at_all_is_skipped(self):
+        result = self.post({"alert_id": "orca-noasset"}).get_json()["results"][0]
+        self.assertEqual(result["status"], "skipped_no_code_origin")
+
+    def test_skips_are_not_cached_so_a_later_scan_can_succeed(self):
+        # A code origin can appear after the next IaC scan; caching the skip would
+        # mean never retrying. Nothing was spent, so replaying is cheap.
+        self.post({"alert_id": "orca-nocode"})
+        self.assertNotIn("orca-nocode", self.main._seen)
 
 
 class Logging(unittest.TestCase):

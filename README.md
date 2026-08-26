@@ -43,9 +43,19 @@ Then, in Orca — **Settings → Connections → Integrations → Webhook → Cr
 | Header | `X-Orca-Webhook-Token` = the webhook secret |
 | Body | tick **All alert fields in JSON** |
 
-Finally add an automation rule scoped to your SAST / code security alerts and send
-them to that webhook. Scope it narrowly — every alert that reaches the function
-spends an AI metering unit.
+Finally add an automation rule and send its alerts to that webhook. Scope it in
+Orca, where the query language can express what you want directly (has code
+origin, business unit, severity) — that is the right place for policy, and it is
+what keeps volume down. The function then applies the structural filter described
+under [How it works](#how-it-works): an alert that resolves to no code is skipped
+before anything billable happens.
+
+`ALERT_TYPE_ALLOWLIST` exists as a coarse second net and is **off by default**. It
+matches substrings against alert type and category fields, so it is only useful
+for a temporary narrowing ("just SAST this week"); it is not a maintainable gate
+across CSPM's category space. When it does drop an alert, that is logged at
+WARNING with the fields it actually saw, so a field-name mismatch can't masquerade
+as normal operation.
 
 Verify the deployment answers at all:
 
@@ -122,16 +132,32 @@ batch shapes.
 
 | # | Call | Purpose |
 |---|---|---|
-| 1 | `POST /api/serving-layer/query` | alert id → `repository_context_id` |
-| 2 | `POST /api/ai-core/skills/code_remediation/sast` | generate the fix |
+| 1 | `POST /api/serving-layer/query` | alert id → `repository_context_id`, and which skill applies |
+| 1b | `POST /api/serving-layer/query` | for a cloud asset: → the repo whose IaC deployed it |
+| 2 | `POST /api/ai-core/skills/code_remediation/{sast\|c2d}` | generate the fix |
 | 3 | `POST /api/shiftleft/repository_contexts/{id}/pull_requests/` | open the PR |
 
-**Step 1.** `repository_context_id` isn't a special identifier — it's the alert's
-CodeRepository asset `Id`, at `data[0].data.Inventory.data.Id.value`. This step
-also acts as the filter for non-code alerts: they fail here, before step 2, so
-they cost nothing.
+**Step 1 — two kinds of alert reach code by different routes.** What
+distinguishes them is the alert's **asset type**, not its category:
 
-**Step 2.** Synchronous, no polling, 13–24s. Returns the whole result in one shot:
+| Alert's asset | Where the code is | Repo id from | Skill |
+|---|---|---|---|
+| `CodeRepository` | the repo Orca scanned (SAST, IaC-in-repo) | `Inventory.data.Id.value` | `sast` |
+| a cloud resource | the IaC that deployed it (CSPM code-to-cloud) | code origin → `CodeRepository.data.Id.value` | `c2d` |
+
+A cloud resource's Inventory has no `Id` field at all, which is the tell. Its repo
+comes from a second query for the `CodeOrigin` objects whose `Inventories`
+include that asset.
+
+**This is also the filter**, and deliberately so: "can this alert be resolved to
+code?" is answered structurally, before step 2, and costs no AI metering unit. It
+needs no list of alert categories — which matters, because CSPM has hundreds and
+any name-based allowlist would both miss new ones and silently drop valid ones.
+An alert that resolves to nothing is reported as `skipped_no_code_origin`, the
+normal outcome for a resource never deployed from IaC Orca can see.
+
+**Step 2.** Same request and same response shape for both skills — only the
+endpoint differs. Synchronous, no polling, 13–24s. Returns the whole result in one shot:
 `fixed_code`, `original_code`, `pr_title`, `pr_description`, `file_path`,
 `considerations`, plus `is_false_positive` and `remediation_type` gates. It re-runs
 the model per call, so output is **non-deterministic** and each call costs an AI
@@ -150,6 +176,21 @@ fixed_content  <- base64(fixed_code)
 
 No client-side diffing, branch naming, or commit logic — Orca's backend does all of
 it. Returns `201 {"url": "https://github.com/…/pull/N"}`.
+
+## What it can and cannot fix
+
+| Alert kind | Supported | Route |
+|---|---|---|
+| SAST findings in scanned source | yes | `sast` |
+| IaC findings in a scanned repo | yes | `sast` |
+| CSPM misconfigurations **with** IaC code origin | yes | `c2d` |
+| CSPM misconfigurations **without** code origin | no — `skipped_no_code_origin` | there is no code to patch |
+| Anything Orca returns `remediation_type != "code_fix"` for | no — `skipped_no_code_fix` | action steps only, no patch |
+
+Verified across `AwsS3Bucket`, `AwsEc2Elbv2`, `AwsRdsDbInstance`,
+`AwsEc2VpcEndpoint`, `AzureStorageAccount`, and `CodeRepository` assets. The
+resolver is asset-type driven, so a cloud resource type not listed here needs no
+code change.
 
 ## Webhook behaviour
 

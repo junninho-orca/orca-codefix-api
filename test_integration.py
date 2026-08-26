@@ -313,5 +313,47 @@ class WebhookIntegration(unittest.TestCase):
             os.environ.pop("MAX_ALERTS_PER_REQUEST", None)
 
 
+class Logging(unittest.TestCase):
+    """The bug this guards: INFO records were silently dropped in production.
+
+    logging.basicConfig() is a no-op once a host framework has configured root
+    logging, which left the module logger with no handler at level WARNING, so
+    successful runs logged nothing at all.
+    """
+
+    def test_info_survives_a_prior_root_logging_config(self):
+        import io
+        import json as _json
+        import logging as _logging
+
+        # Reproduce the Functions Framework's setup: root configured first.
+        root = _logging.getLogger()
+        saved = root.handlers[:]
+        root.handlers = [_logging.NullHandler()]
+        try:
+            import main as _main
+
+            logger = _main._configure_logging()
+            self.assertTrue(logger.handlers, "logger must own a handler")
+            self.assertEqual(logger.level, _logging.INFO)
+
+            buf = io.StringIO()
+            logger.handlers[0].stream = buf
+            logger.info("hello", extra={"context": {"alert_id": "orca-1"}})
+            line = buf.getvalue().strip()
+            self.assertTrue(line, "INFO record must be emitted, not dropped")
+
+            entry = _json.loads(line)
+            self.assertEqual(entry["severity"], "INFO")
+            self.assertEqual(entry["message"], "hello")
+            self.assertEqual(entry["alert_id"], "orca-1")
+        finally:
+            root.handlers = saved
+
+    def test_records_are_not_emitted_twice(self):
+        import main as _main
+
+        self.assertFalse(_main.log.propagate)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

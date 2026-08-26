@@ -222,3 +222,35 @@ def extract_alert_ids(payload: object) -> list[str]:
             continue
         ids.append(alert_id)
     return ids
+
+
+def describe_for_diagnosis(payload: object) -> dict:
+    """Summarise a payload that produced no work, so the cause is visible in logs.
+
+    A filtered or unrecognised payload otherwise fails silently: Orca gets its
+    200 and nothing happens, with no way to tell a correctly-ignored alert from
+    a field-name mismatch that is dropping everything. Reports structure only —
+    top-level keys and the classification fields the filter reads — never the
+    alert body, which is large and describes customer code.
+    """
+    if isinstance(payload, list):
+        return {"payload_type": "list", "items": len(payload)}
+    if not isinstance(payload, dict):
+        return {"payload_type": type(payload).__name__}
+
+    alert = unwrap(payload)
+    seen = {}
+    for field in TYPE_FIELDS:
+        value = _unwrap_value(alert.get(field))
+        if value is not None:
+            seen[field] = str(value)[:80]
+
+    return {
+        "payload_type": "dict",
+        "top_level_keys": sorted(alert.keys())[:40],
+        "type_fields_present": seen,
+        "alert_ids_found": [
+            a for a in (_alert_id_of(x) for x in extract_alerts(payload)) if a
+        ][:20],
+        "allowlist": os.environ.get("ALERT_TYPE_ALLOWLIST", "").strip(),
+    }

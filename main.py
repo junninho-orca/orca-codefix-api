@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from collections import OrderedDict
 
@@ -28,8 +29,50 @@ import functions_framework
 import orca_codefix
 import webhook
 
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-log = logging.getLogger("orca-codefix")
+
+class CloudLoggingFormatter(logging.Formatter):
+    """Emit one JSON object per line so Cloud Logging parses it properly.
+
+    Cloud Run reads stdout. A plain-text line arrives with no severity attached,
+    which makes "show me only the failures" impossible; a JSON line carrying a
+    `severity` key is mapped to the real log level, and anything else in the
+    object becomes queryable as jsonPayload.<field> — so an operator can ask for
+    one alert id and get its whole history.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "severity": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        entry.update(getattr(record, "context", {}))
+        if record.exc_info:
+            entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entry, default=str)
+
+
+def _configure_logging() -> logging.Logger:
+    """Set up our own handler, because logging.basicConfig() cannot work here.
+
+    The Functions Framework configures root logging before it imports this
+    module, so basicConfig() sees existing handlers and returns having done
+    nothing. This logger would then sit at the default level with no handler of
+    its own and silently drop every INFO record — hiding exactly the lines worth
+    auditing, namely which alert produced which pull request. Attach a handler
+    explicitly and stop propagating, so records are emitted once, by us.
+    """
+    logger = logging.getLogger("orca-codefix")
+    logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(CloudLoggingFormatter())
+        logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+log = _configure_logging()
 
 # Alert ids already handled by this instance, newest last. Orca retries a webhook
 # it considers failed, and generating a fix is both billable and repo-writing, so
@@ -55,7 +98,11 @@ def process_alert(alert_id: str, create_pr: bool) -> dict:
     started = time.monotonic()
 
     if _DEDUPE_WINDOW > 0 and alert_id in _seen:
-        log.info("%s already processed by this instance, skipping", alert_id)
+        log.info(
+            "%s already processed by this instance, skipping",
+            alert_id,
+            extra={"context": {"alert_id": alert_id, "deduplicated": True}},
+        )
         # Report this call's own (near-zero) duration, not the cached run's.
         return {**_seen[alert_id], "deduplicated": True, "duration_seconds": 0.0}
 
@@ -68,14 +115,31 @@ def process_alert(alert_id: str, create_pr: bool) -> dict:
             "error": str(exc),
             "retryable": exc.retryable,
         }
-        log.error("%s failed: %s", alert_id, exc)
+        log.error(
+            "%s failed: %s",
+            alert_id,
+            exc,
+            extra={"context": {"alert_id": alert_id, "retryable": exc.retryable}},
+        )
     else:
         # The generated patch can be tens of KB. It belongs in the pull request,
         # not in a webhook response Orca discards, so report it by size only.
         fix = result.pop("fix", None)
         if fix:
             result["fixed_code_bytes"] = len(fix.get("fixed_code") or "")
-        log.info("%s -> %s", alert_id, result.get("status"))
+        log.info(
+            "%s -> %s",
+            alert_id,
+            result.get("status"),
+            extra={
+                "context": {
+                    "alert_id": alert_id,
+                    "status": result.get("status"),
+                    "file_path": result.get("file_path"),
+                    "pull_request_url": result.get("pull_request_url"),
+                }
+            },
+        )
 
     result["duration_seconds"] = round(time.monotonic() - started, 1)
     if _DEDUPE_WINDOW > 0 and result.get("status") != "error":
@@ -106,14 +170,34 @@ def orca_webhook(request):
             raise webhook.WebhookError("request body is not valid JSON")
         alert_ids = webhook.extract_alert_ids(payload)
     except webhook.WebhookError as exc:
-        log.warning("rejected request: %s", exc)
+        context = {}
+        if exc.status == 400:
+            # A 400 usually means the body template is wrong. Log the shape that
+            # arrived so the mismatch is diagnosable without guessing.
+            context = webhook.describe_for_diagnosis(request.get_json(silent=True, force=True))
+        log.warning("rejected request: %s", exc, extra={"context": context})
         return _json({"error": str(exc)}, exc.status)
 
     if not alert_ids:
-        # Parsed fine, but ALERT_TYPE_ALLOWLIST filtered everything out. This is a
-        # success: Orca did its job and we deliberately did nothing.
-        log.info("no alerts matched ALERT_TYPE_ALLOWLIST")
-        return _json({"status": "ignored", "reason": "no alerts matched type filter"})
+        # Parsed fine, but ALERT_TYPE_ALLOWLIST filtered everything out. Orca gets
+        # a 200 either way, so this is logged at WARNING with the fields that were
+        # actually checked: a filter that silently drops every alert because of a
+        # field-name mismatch looks identical to one working as intended.
+        diagnosis = webhook.describe_for_diagnosis(payload)
+        log.warning(
+            "no alerts matched ALERT_TYPE_ALLOWLIST=%r — if this is unexpected, "
+            "compare it against type_fields_present",
+            diagnosis.get("allowlist"),
+            extra={"context": diagnosis},
+        )
+        return _json(
+            {
+                "status": "ignored",
+                "reason": "no alerts matched type filter",
+                "allowlist": diagnosis.get("allowlist"),
+                "type_fields_present": diagnosis.get("type_fields_present"),
+            }
+        )
 
     limit = int(os.environ.get("MAX_ALERTS_PER_REQUEST", "10"))
     skipped = alert_ids[limit:]

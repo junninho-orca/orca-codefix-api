@@ -1,0 +1,15 @@
+# Keep the deployed source to just what the function imports at runtime.
+.git/
+.gitignore
+.gcloudignore
+.env
+.env.example
+ca.pem
+*.har
+__pycache__/
+*.pyc
+README.md
+deploy.sh
+run_local.sh
+test_webhook.py
+samples/

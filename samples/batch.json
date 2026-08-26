@@ -1,0 +1,7 @@
+{
+  "version": "1.0",
+  "data": [
+    {"alert_id": "orca-1596292", "type_key": "sast_finding"},
+    {"alert_id": "orca-1596293", "type_key": "sast_finding"}
+  ]
+}

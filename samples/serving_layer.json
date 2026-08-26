@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "data": {
+    "AlertId": {"value": "orca-1590385"},
+    "AlertType": {"value": "Misconfigured GitHub Trigger - pull_request_target"},
+    "AppsecScanType": {"value": "SAST"},
+    "Category": {"value": "Data protection"},
+    "CodeLanguage": {"value": "yaml"},
+    "FilePath": {"value": ".github/workflows/pr-review.yml"},
+    "RiskLevel": {"value": "high"},
+    "SecurityDomains": {"value": ["AppSec"]},
+    "Status": {"value": "open"},
+    "Title": {"value": "Misconfigured GitHub Trigger - pull_request_target"},
+    "AssetData": {"value": {"asset_name": "seashell-code-auditor/pipeline-deployment", "asset_type": "CodeRepository"}}
+  }
+}

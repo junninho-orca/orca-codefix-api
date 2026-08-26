@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "data": {
+    "alert_id": "orca-1596292",
+    "type_key": "sast_finding",
+    "type_string": "SAST Finding",
+    "category": "Code Security",
+    "risk_level": "high",
+    "description": "SQL injection in the user lookup handler",
+    "asset_name": "acme/payments-api"
+  }
+}

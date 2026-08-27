@@ -1,0 +1,3 @@
+# The Cloud Function's only dependency. Everything else — the Orca API calls, the
+# payload parsing — is Python standard library.
+functions-framework>=3.8,<4

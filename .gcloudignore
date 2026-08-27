@@ -1,0 +1,8 @@
+# The function needs only the three modules and requirements.txt.
+.git/
+.gitignore
+.gcloudignore
+README.md
+deploy.sh
+__pycache__/
+*.pyc

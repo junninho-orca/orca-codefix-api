@@ -1,18 +1,16 @@
 """Cloud Functions v2 entrypoint: Orca alert webhook -> AI code fix -> pull request.
 
 Deploy with deploy.sh, point an Orca webhook integration at the resulting URL, and
-every alert Orca sends gets a fix generated and (with CREATE_PR=true) a pull request
-opened by Orca's own GitHub App.
+every alert Orca sends gets a fix generated and, with CREATE_PR=true, a pull
+request opened by Orca's own GitHub App.
 
-Environment (see .env.example for the full list):
-    ORCA_API_TOKEN    required   Orca API token; needs ai-core remediation + shiftleft write
-    WEBHOOK_SECRET    required   shared secret Orca must present, or the endpoint 401s
-    CREATE_PR         default false   false generates the fix without writing to the repo
+All configuration comes from the environment variables set on the function; see
+the table in README.md. ORCA_API_TOKEN and WEBHOOK_SECRET are injected from Secret
+Manager, and the function refuses every request if the secret is unset.
 
-Processing is synchronous because Orca's fix generation is: step 2 takes 13-24s and
-has no polling API. A single alert therefore takes roughly 15-40s end to end, which
-is why the function is deployed with a 300s timeout. DEDUPE_WINDOW guards against
-the same alert being processed twice if it is delivered more than once.
+Processing is synchronous because Orca's fix generation is: step 2 takes 13-24s
+and has no polling API, so one alert takes roughly 15-40s and the function is
+deployed with a 300s timeout.
 """
 
 from __future__ import annotations

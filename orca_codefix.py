@@ -1,50 +1,39 @@
-#!/usr/bin/env python3
-"""Open an Orca AI code fix as a pull request, without the UI.
+"""The Orca "AI code fix -> pull request" flow, in three API calls.
 
-Three calls, one Orca API token:
+  1. POST /api/serving-layer/query                  alert id -> repository, and
+                                                    which remediation skill fits
+  2. POST /api/ai-core/skills/code_remediation/...  generate the fix (~20s)
+  3. POST .../repository_contexts/{id}/pull_requests/  open the PR
 
-  1. POST /api/serving-layer/query                    alert id -> repository_context_id
-  2. POST /api/ai-core/skills/code_remediation/sast   generate the fix (~20s, synchronous)
-  3. POST .../repository_contexts/{id}/pull_requests/ open the PR
+Step 3's body is step 2's response remapped, with the code base64'd. Orca drives
+its own GitHub App server-side, so no GitHub credential is involved here.
 
-Step 3's body is just step 2's response remapped, with the code base64'd. Orca
-drives its own GitHub App server-side, so no GitHub credential is involved.
+Reads one environment variable, ORCA_API_TOKEN, which needs two separately
+granted permissions: the ai-core remediation skill for step 2, and shiftleft
+write for step 3. Missing either is a 403, and the shape says which:
+{"detail": ...} from ai-core, {"error_code": "permission_denied"} from shiftleft.
+A third form, error_code "1012", means the token was fine but Orca's GitHub App
+lacks `Contents write` on that repository.
 
-    export ORCA_API_TOKEN="..."
-    ./orca_codefix.py orca-1596292 --create-pr
-
-The token needs two separately-granted permissions: the ai-core remediation skill
-for step 2, and shiftleft write for step 3. Missing either is a 403, and the shape
-says which: {"detail": ...} from ai-core, {"error_code": "permission_denied"} from
-shiftleft. A third form, error_code "1012", means the token was fine but Orca's
-GitHub App lacks `Contents write` on that repo.
-
-Behind a TLS-intercepting proxy, point Python at the system roots first:
-    security find-certificate -a -p /Library/Keychains/System.keychain > ca.pem
-    export SSL_CERT_FILE="$PWD/ca.pem"
-
-This module is also the engine behind the Cloud Function in main.py, so the
-library half raises OrcaError instead of exiting; only the CLI half exits.
+Raises OrcaError rather than exiting, so main.py decides what a failure means.
 """
 
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import os
-import pathlib
 import re
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
+# Overridable only so the test suite can point at a local stand-in for the API.
 BASE = os.environ.get("ORCA_API_BASE", "https://api.orcasecurity.io")
-APP = os.environ.get("ORCA_APP_BASE", "https://app.orcasecurity.io")
+APP = "https://app.orcasecurity.io"
 
 # Step 2 re-runs the model server-side and takes 13-24s in practice.
-TIMEOUT = int(os.environ.get("ORCA_HTTP_TIMEOUT", "180"))
+TIMEOUT = 180
 
 
 # Anything interpolated into a URL path must not be able to leave its segment.
@@ -66,35 +55,12 @@ class OrcaError(Exception):
         self.retryable = retryable
 
 
-def load_dotenv() -> None:
-    """Load a .env sitting next to this script. Real env vars win over the file."""
-    path = pathlib.Path(__file__).resolve().with_name(".env")
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
-
-
 def auth_header() -> str:
-    """The Authorization header value to send to Orca.
-
-    ORCA_AUTH is the full header value and wins. ORCA_API_TOKEN is the bare token,
-    which is the friendlier thing to put in Secret Manager.
-    """
-    auth = os.environ.get("ORCA_AUTH", "").strip()
-    if auth:
-        return auth
+    """The Authorization header value to send to Orca."""
     token = os.environ.get("ORCA_API_TOKEN", "").strip()
-    if token:
-        return f"Token {token}"
-    raise OrcaError(
-        "no Orca credential: set ORCA_API_TOKEN (bare token) or ORCA_AUTH "
-        '(full header value, e.g. "Token abc123")'
-    )
+    if not token:
+        raise OrcaError("ORCA_API_TOKEN is not set")
+    return f"Token {token}"
 
 
 def resolve_url(path: str) -> str:
@@ -250,11 +216,6 @@ def lookup_code_origin(alert_id: str, asset_id: str, auth: str | None = None) ->
         ) from None
 
 
-def lookup_repo_context(alert_id: str, auth: str | None = None) -> str:
-    """Back-compat wrapper: the repository context id alone."""
-    return resolve_target(alert_id, auth)[0]
-
-
 def generate_fix(
     alert_id: str, repo_context_id: str, auth: str | None = None, skill: str = "sast"
 ) -> dict:
@@ -301,28 +262,15 @@ def open_pull_request(
     )
 
 
-def remediate(
-    alert_id: str,
-    create_pr: bool = False,
-    repo_context_id: str | None = None,
-    auth: str | None = None,
-    self_skill: str | None = None,
-) -> dict:
+def remediate(alert_id: str, create_pr: bool = False, auth: str | None = None) -> dict:
     """Run the whole flow for one alert and describe what happened.
 
     Returns a dict with `status` in: skipped_false_positive, skipped_no_code_fix,
     generated (fix produced, PR not requested), pr_opened. A NoCodeOrigin is left
     to the caller, which knows whether to treat it as a skip or an error.
-
-    `self_skill` only applies alongside repo_context_id, where the asset that
-    would otherwise select the skill was never looked up.
     """
     auth = auth or auth_header()
-    if repo_context_id:
-        # Caller supplied the repo, so the skill can't be inferred from the asset.
-        ctx, skill = repo_context_id, self_skill or "sast"
-    else:
-        ctx, skill = resolve_target(alert_id, auth)
+    ctx, skill = resolve_target(alert_id, auth)
     fix = generate_fix(alert_id, ctx, auth, skill=skill)
 
     result = {
@@ -345,46 +293,3 @@ def remediate(
 
     pr = open_pull_request(alert_id, ctx, fix, auth)
     return {**result, "status": "pr_opened", "pull_request_url": pr.get("url")}
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    ap.add_argument("alert_id", help="e.g. orca-1596292")
-    ap.add_argument("--repo-context-id", help="skip the step 1 lookup")
-    ap.add_argument(
-        "--skill",
-        choices=("sast", "c2d"),
-        help="remediation skill; inferred from the alert's asset unless "
-        "--repo-context-id is given",
-    )
-    ap.add_argument("--create-pr", action="store_true", help="open the PR (writes to the repo)")
-    args = ap.parse_args()
-
-    load_dotenv()
-    try:
-        auth = auth_header()
-        if args.repo_context_id:
-            ctx, skill = args.repo_context_id, args.skill or "sast"
-        else:
-            ctx, skill = resolve_target(args.alert_id, auth)
-        print(f"repository_context_id: {ctx} (skill: {skill})", file=sys.stderr)
-
-        fix = generate_fix(args.alert_id, ctx, auth, skill=skill)
-        json.dump(fix, sys.stdout, indent=2)
-
-        if fix.get("is_false_positive") or fix.get("remediation_type") != "code_fix":
-            sys.exit("\nno code fix to submit")
-        if not args.create_pr:
-            print("\n(dry run — pass --create-pr to open the PR)", file=sys.stderr)
-            return
-
-        pr = open_pull_request(args.alert_id, ctx, fix, auth)
-        print(f"\nopened {pr['url']}", file=sys.stderr)
-    except OrcaError as exc:
-        sys.exit(str(exc))
-
-
-if __name__ == "__main__":
-    main()

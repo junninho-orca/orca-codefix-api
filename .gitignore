@@ -1,5 +1,2 @@
-.env
-ca.pem
-*.har
 __pycache__/
 *.pyc

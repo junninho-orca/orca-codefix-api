@@ -12,8 +12,8 @@
 #   REGION           default us-central1
 #   FUNCTION_NAME    default orca-codefix-webhook
 #   CREATE_PR        default true   — set false to generate fixes without opening PRs
-#   ORCA_API_TOKEN   read from the environment or .env, else prompted for
-#   WEBHOOK_SECRET   read from the environment or .env, else generated
+#   ORCA_API_TOKEN   read from the environment, else prompted for
+#   WEBHOOK_SECRET   read from the environment, else generated
 #
 set -euo pipefail
 
@@ -26,6 +26,10 @@ TOKEN_SECRET="${TOKEN_SECRET:-orca-api-token}"
 WEBHOOK_SECRET_NAME="${WEBHOOK_SECRET_NAME:-orca-webhook-secret}"
 CREATE_PR="${CREATE_PR:-true}"
 ALERT_TYPE_ALLOWLIST="${ALERT_TYPE_ALLOWLIST:-}"
+WEBHOOK_SECRET_HEADER="${WEBHOOK_SECRET_HEADER:-X-Orca-Webhook-Token}"
+MAX_ALERTS_PER_REQUEST="${MAX_ALERTS_PER_REQUEST:-10}"
+DEDUPE_WINDOW="${DEDUPE_WINDOW:-512}"
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
 TIMEOUT="${TIMEOUT:-300s}"
 MEMORY="${MEMORY:-512Mi}"
 MAX_INSTANCES="${MAX_INSTANCES:-3}"
@@ -33,11 +37,6 @@ MAX_INSTANCES="${MAX_INSTANCES:-3}"
 if [[ -z "$PROJECT_ID" ]]; then
   echo "No GCP project set. Run: gcloud config set project YOUR_PROJECT" >&2
   exit 1
-fi
-
-# Pick up credentials from a local .env the same way the CLI does.
-if [[ -f .env ]]; then
-  set -a; . ./.env; set +a
 fi
 
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -131,7 +130,7 @@ gcloud functions deploy "$FUNCTION_NAME" \
   --timeout "$TIMEOUT" \
   --memory "$MEMORY" \
   --max-instances "$MAX_INSTANCES" \
-  --set-env-vars "CREATE_PR=${CREATE_PR},ALERT_TYPE_ALLOWLIST=${ALERT_TYPE_ALLOWLIST}" \
+  --set-env-vars "^;^CREATE_PR=${CREATE_PR};ALERT_TYPE_ALLOWLIST=${ALERT_TYPE_ALLOWLIST};WEBHOOK_SECRET_HEADER=${WEBHOOK_SECRET_HEADER};MAX_ALERTS_PER_REQUEST=${MAX_ALERTS_PER_REQUEST};DEDUPE_WINDOW=${DEDUPE_WINDOW};LOG_LEVEL=${LOG_LEVEL}" \
   --set-secrets "ORCA_API_TOKEN=${TOKEN_SECRET}:latest,WEBHOOK_SECRET=${WEBHOOK_SECRET_NAME}:latest" \
   --project "$PROJECT_ID"
 
@@ -148,8 +147,11 @@ Configure Orca — Settings > Connections > Integrations > Webhook > Create:
   Header      : X-Orca-Webhook-Token = <the webhook secret>
   Body        : tick "All alert fields in JSON"
 
-Then add an automation rule scoped to your SAST / code security alerts and send
-them to this webhook.
+Then add an automation rule in Orca and send its alerts to this webhook.
+
+Settings live on the function, editable without redeploying:
+  gcloud functions deploy ${FUNCTION_NAME} --region=${REGION} --project=${PROJECT_ID} \
+    --update-env-vars CREATE_PR=false
 
 Health check:
   curl ${URL}

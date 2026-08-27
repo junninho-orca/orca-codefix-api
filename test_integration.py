@@ -149,7 +149,6 @@ class WebhookIntegration(unittest.TestCase):
             CREATE_PR="true",
             LOG_LEVEL="CRITICAL",
         )
-        os.environ.pop("ORCA_AUTH", None)
         os.environ.pop("ALERT_TYPE_ALLOWLIST", None)
 
         import orca_codefix

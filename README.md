@@ -23,11 +23,26 @@ account, and set IAM bindings — Editor plus Secret Manager Admin, or Owner.
 
 ### Token role
 
-Assign the API token the **Editor** role — the narrowest built-in role that covers
-all three calls. The AppSec-sounding alternatives don't work: Shiftleft
-Administrator, Shiftleft Alert Manager and Alert Manager each lack the AI
-remediation permission, and AI Agent lacks the pull request one. Any of them fails
-with one of the 403s in [Troubleshooting a 403](#troubleshooting-a-403).
+Create a custom role with these eleven permissions and assign it to the token:
+
+```
+assets.asset.read                              risks.alerts.read
+assets.query                                   risks.query
+assets.query.read                              risks.query.read
+
+platform.ai_features                           shiftleft.repository_contexts
+platform.ai_code_remediation.use               shiftleft.repository_contexts.read
+                                               shiftleft.repository_contexts.pull_requests
+```
+
+The narrowest built-in alternative is **Editor**, at 170 permissions including
+write access to alerts, compliance frameworks and every SCM integration — more
+than a token behind an internet-facing endpoint should carry. Nothing narrower
+works: the AppSec-sounding roles lack the AI remediation permission and AI Agent
+lacks the pull request one, each failing with one of the 403s in
+[Troubleshooting a 403](#troubleshooting-a-403).
+
+If step 1 returns 403, add `shiftleft.projects.read`.
 
 Then in Orca — **Settings → Connections → Integrations → Webhook → Create**:
 

@@ -16,8 +16,21 @@ credentials in Secret Manager, creates the service account, deploys the function
 and prints the trigger URL and webhook secret. It prompts for the Orca token if
 `ORCA_API_TOKEN` isn't already in your environment.
 
-Create that token with the **AI Code Fix (Custom)** role. The deploying account
-needs Editor plus Secret Manager Admin, or Owner.
+The deploying account needs Editor plus Secret Manager Admin, or Owner.
+
+### Create the Orca API token
+
+In Orca — **Settings → Users & Permissions → API → Create API Token**:
+
+| Field | Value |
+|---|---|
+| Name | anything, e.g. `codefix-webhook` |
+| Service Token | tick — not tied to a person who may later be deprovisioned |
+| Role | **AI Code Fix (Custom)** |
+| Scope | optionally limit to specific Shift Left Projects |
+
+Copy the token value before closing the window — Orca shows it once and it can't
+be retrieved afterwards. That value is what `deploy.sh` asks for.
 
 Then in Orca — **Settings → Connections → Integrations → Webhook → Create**:
 
@@ -50,12 +63,20 @@ gcloud functions deploy orca-codefix-webhook --region=us-central1 \
 | `DEDUPE_WINDOW` | `512` | recent alert ids remembered per instance; `0` disables |
 | `LOG_LEVEL` | `INFO` | |
 
-`ORCA_API_TOKEN` and `WEBHOOK_SECRET` come from Secret Manager. To rotate, add a
-version and redeploy — the function resolves `:latest` at deploy time:
+`ORCA_API_TOKEN` and `WEBHOOK_SECRET` come from Secret Manager.
+
+Read the webhook secret back:
+
+```bash
+gcloud secrets versions access latest --secret=orca-webhook-secret
+```
+
+Rotate the Orca token — create a new one as above, then add it as a version and
+redeploy, since the function resolves `:latest` at deploy time:
 
 ```bash
 printf '%s' "NEW_TOKEN" | gcloud secrets versions add orca-api-token --data-file=-
-gcloud secrets versions access latest --secret=orca-webhook-secret   # read it back
+./deploy.sh
 ```
 
 ## What it can fix

@@ -34,10 +34,15 @@ built-in role grants together:
 | AI Agent | yes | **no** |
 | Shiftleft Administrator | **no** | yes |
 | Shiftleft Alert Manager | **no** | yes |
+| Alert Manager | **no** | **no** |
 
-The two shiftleft roles are the tempting wrong answer: they look purpose-built,
-generate nothing, and fail at step 2. A token with only half the pair produces the
-403s in [Troubleshooting a 403](#troubleshooting-a-403).
+Alert Manager is verified insufficient: an Alert Manager token resolves the alert
+at step 1 (HTTP 200) and is then refused at both write steps —
+`403 {"detail": "Insufficient permissions"}` from ai-core, and
+`403 {"error_code": "permission_denied"}` from shiftleft. The two shiftleft roles
+are the more tempting wrong answer: they look purpose-built, generate nothing, and
+fail at step 2. A token with only part of the pair produces the 403s in
+[Troubleshooting a 403](#troubleshooting-a-403).
 
 If your tenant allows custom roles, eleven permissions are sufficient —
 `assets.asset.read`, `assets.query{,.read}`, `risks.alerts.read`,

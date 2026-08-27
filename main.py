@@ -11,8 +11,8 @@ Environment (see .env.example for the full list):
 
 Processing is synchronous because Orca's fix generation is: step 2 takes 13-24s and
 has no polling API. A single alert therefore takes roughly 15-40s end to end, which
-is why the function is deployed with a 300s timeout. If Orca times out and retries,
-DEDUPE_WINDOW guards against opening the same pull request twice.
+is why the function is deployed with a 300s timeout. DEDUPE_WINDOW guards against
+the same alert being processed twice if it is delivered more than once.
 """
 
 from __future__ import annotations
@@ -74,10 +74,11 @@ def _configure_logging() -> logging.Logger:
 
 log = _configure_logging()
 
-# Alert ids already handled by this instance, newest last. Orca retries a webhook
-# it considers failed, and generating a fix is both billable and repo-writing, so
-# a replay must not run twice. This is per-instance and therefore best-effort: it
-# catches the common case where a retry lands on the warm instance that just ran.
+# Alert ids already handled by this instance, newest last. Generating a fix is both
+# billable and repo-writing, so a duplicate delivery must not run twice. This is
+# per-instance and therefore best-effort: it catches a duplicate landing on the
+# warm instance that just ran, and misses one arriving after a cold start or a
+# redeploy, or on a second instance.
 _DEDUPE_WINDOW = int(os.environ.get("DEDUPE_WINDOW", "512"))
 _seen: OrderedDict[str, dict] = OrderedDict()
 
@@ -230,8 +231,8 @@ def orca_webhook(request):
     if skipped:
         body["not_processed"] = skipped
 
-    # Ask Orca to retry only when every failure was transient, so a permanent
-    # failure (no code fix, missing permission) doesn't loop forever.
+    # Signal that re-delivery is worth attempting only when every failure was
+    # transient, so a permanent one (missing permission) cannot loop forever.
     errors = [r for r in results if r.get("status") == "error"]
     if errors and len(errors) == len(results) and all(r.get("retryable") for r in errors):
         return _json(body, 503)

@@ -204,13 +204,19 @@ against `orca-[A-Za-z0-9]+` before reaching any API call.
 has no polling API. One alert takes roughly 15–40s, which is why the function is
 deployed with a 300s timeout.
 
-**Retries.** Orca retries a webhook it considers failed, and each replay would
-otherwise spend another metering unit and open another PR. Each instance remembers
-the last `DEDUPE_WINDOW` alert ids and short-circuits repeats. This is
-per-instance, so it catches the common case — a retry landing on the instance that
-just ran — not every possible duplicate. The function also returns `503` (asking
-Orca to retry) only when every failure in the request was transient; permanent
-outcomes return `200` so they don't loop.
+**Duplicate deliveries.** Generating a fix is billable and opens a pull request,
+so the same alert arriving twice must not run twice. Each instance remembers the
+last `DEDUPE_WINDOW` alert ids and short-circuits repeats.
+
+This guard is per-instance, and therefore partial: it catches a duplicate that
+lands on the instance which just ran, and misses one that arrives after a cold
+start or a redeploy, or lands on a second instance. Whether Orca re-delivers a
+webhook, and under what conditions, is not documented and was not verified here —
+so treat this as a safety net, not a guarantee.
+
+The function returns `503` only when every failure in the request was transient,
+which signals that re-delivery is worth attempting; permanent outcomes return
+`200` so they cannot loop.
 
 **Response codes.**
 
@@ -220,7 +226,7 @@ outcomes return `200` so they don't loop.
 | `400` | body isn't JSON, or carries no recognisable alert id |
 | `401` | missing or wrong shared secret |
 | `405` | not `GET` or `POST` |
-| `503` | every alert failed transiently — Orca should retry |
+| `503` | every alert failed transiently — re-delivery worth attempting |
 
 ## Security model
 

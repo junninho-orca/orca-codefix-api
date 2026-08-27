@@ -29,7 +29,6 @@ In Orca — **Settings → Users & Permissions → API → Create API Token**:
 | Name | anything, e.g. `codefix-webhook` |
 | Service Token | tick — not tied to a person who may later be deprovisioned |
 | Role | **AI Code Fix (Custom)** |
-| Scope | optionally limit to specific Shift Left Projects |
 
 Copy the token value before closing the window — Orca shows it once and it can't
 be retrieved afterwards. That value is what `deploy.sh` asks for.

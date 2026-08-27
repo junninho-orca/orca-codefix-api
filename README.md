@@ -204,9 +204,6 @@ says which:
 | `{"error_code": "permission_denied"}` | shiftleft write not granted | grant it (blocks step 3) |
 | `{"error_code": "1012"}` | token is fine; Orca's **GitHub App** lacks `Contents write` on that repository | grant the App access to that repository |
 
-The last one is per-repository and unrelated to the token — it fires even for a
-fully authorised browser session, and it is granted repository by repository.
-
 ## Tests
 
 ```bash

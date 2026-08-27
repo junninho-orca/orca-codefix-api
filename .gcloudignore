@@ -1,11 +1,8 @@
-# Keep the deployed source to just what the function imports at runtime.
+# The function needs only the three modules and requirements.txt.
 .git/
 .gitignore
 .gcloudignore
 README.md
 deploy.sh
-test_webhook.py
-test_integration.py
-samples/
 __pycache__/
 *.pyc

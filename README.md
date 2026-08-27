@@ -204,21 +204,6 @@ says which:
 | `{"error_code": "permission_denied"}` | shiftleft write not granted | grant it (blocks step 3) |
 | `{"error_code": "1012"}` | token is fine; Orca's **GitHub App** lacks `Contents write` on that repository | grant the App access to that repository |
 
-## Tests
-
-```bash
-python3 test_webhook.py                    # payload parsing and auth, stdlib only
-
-python3 -m pip install -r requirements.txt
-python3 test_integration.py                # the function against a fake Orca API
-```
-
-94 tests. Nothing touches the real Orca API, spends a metering unit, or opens a
-pull request — a local server stands in for `api.orcasecurity.io`. Coverage
-includes both routing paths, the payload shapes, auth, the base64 remap, duplicate
-suppression, the skip paths, retryable-vs-permanent error handling, and URL
-safety. Sample payloads are in [samples/](samples/).
-
 ## Note
 
 `CREATE_PR=true` opens real pull requests. It is the deployed default, so the

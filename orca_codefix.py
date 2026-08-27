@@ -34,8 +34,10 @@ import base64
 import json
 import os
 import pathlib
+import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 BASE = os.environ.get("ORCA_API_BASE", "https://api.orcasecurity.io")
@@ -43,6 +45,12 @@ APP = os.environ.get("ORCA_APP_BASE", "https://app.orcasecurity.io")
 
 # Step 2 re-runs the model server-side and takes 13-24s in practice.
 TIMEOUT = int(os.environ.get("ORCA_HTTP_TIMEOUT", "180"))
+
+
+# Anything interpolated into a URL path must not be able to leave its segment.
+# UUIDs and the test fixtures both satisfy this; a value containing / . : or %
+# does not.
+PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 class OrcaError(Exception):
@@ -89,10 +97,29 @@ def auth_header() -> str:
     )
 
 
+def resolve_url(path: str) -> str:
+    """Join BASE and path, refusing anything that isn't HTTPS.
+
+    BASE comes from the environment, and urllib honours schemes like file:// and
+    ftp://, so without this a stray ORCA_API_BASE would turn every API call into
+    a local file read. http is permitted against loopback only, so the test suite
+    can point at a local stand-in for the Orca API.
+    """
+    url = BASE.rstrip("/") + path
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "https":
+        return url
+    if parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1"):
+        return url
+    raise OrcaError(
+        f"refusing to call a non-HTTPS URL ({parts.scheme or 'no'} scheme): check ORCA_API_BASE"
+    )
+
+
 def call(path: str, body: dict | None = None, expect: int = 200, auth: str | None = None) -> dict:
     """POST if a body is given, else GET. Raises OrcaError on any other status."""
     req = urllib.request.Request(
-        BASE + path,
+        resolve_url(path),
         data=json.dumps(body).encode() if body is not None else None,
         method="POST" if body is not None else "GET",
         headers={
@@ -239,6 +266,8 @@ def generate_fix(
     """
     if skill not in ("sast", "c2d"):
         raise OrcaError(f"unknown remediation skill {skill!r}")
+    if not PATH_SEGMENT_RE.match(repo_context_id):
+        raise OrcaError(f"repository_context_id has an unexpected form: {repo_context_id!r}")
     return call(
         f"/api/ai-core/skills/code_remediation/{skill}",
         {
@@ -254,6 +283,9 @@ def open_pull_request(
     alert_id: str, repo_context_id: str, fix: dict, auth: str | None = None
 ) -> dict:
     """Step 3. A pure remap of step 2's response; Orca's GitHub App does the rest."""
+    # This one lands in the URL path rather than the body, so bound its shape.
+    if not PATH_SEGMENT_RE.match(repo_context_id):
+        raise OrcaError(f"repository_context_id has an unexpected form: {repo_context_id!r}")
     return call(
         f"/api/shiftleft/repository_contexts/{repo_context_id}/pull_requests/",
         {

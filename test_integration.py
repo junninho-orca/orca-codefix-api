@@ -396,6 +396,65 @@ class CodeToCloud(WebhookIntegration):
         self.assertNotIn("orca-nocode", self.main._seen)
 
 
+class UrlSafety(unittest.TestCase):
+    """The URL is built from an env var and an API-response value, so both are
+    constrained: urllib honours file:// and a path segment must not escape."""
+
+    def setUp(self):
+        self._saved = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._saved)
+
+    def _reload(self):
+        import orca_codefix
+
+        return importlib.reload(orca_codefix)
+
+    def test_https_is_accepted(self):
+        os.environ["ORCA_API_BASE"] = "https://api.orcasecurity.io"
+        oc = self._reload()
+        self.assertEqual(
+            oc.resolve_url("/api/x"), "https://api.orcasecurity.io/api/x"
+        )
+
+    def test_file_scheme_is_refused(self):
+        os.environ["ORCA_API_BASE"] = "file:///etc"
+        oc = self._reload()
+        with self.assertRaises(oc.OrcaError) as ctx:
+            oc.resolve_url("/passwd")
+        self.assertIn("non-HTTPS", str(ctx.exception))
+
+    def test_other_schemes_are_refused(self):
+        for base in ("ftp://host", "gopher://host", "http://evil.example.com"):
+            os.environ["ORCA_API_BASE"] = base
+            oc = self._reload()
+            with self.assertRaises(oc.OrcaError):
+                oc.resolve_url("/api/x")
+
+    def test_plain_http_allowed_only_on_loopback(self):
+        # The test suite points at a local stand-in, so this must keep working.
+        os.environ["ORCA_API_BASE"] = "http://127.0.0.1:8123"
+        oc = self._reload()
+        self.assertEqual(oc.resolve_url("/api/x"), "http://127.0.0.1:8123/api/x")
+
+    def test_trailing_slash_on_base_does_not_double_up(self):
+        os.environ["ORCA_API_BASE"] = "https://api.orcasecurity.io/"
+        oc = self._reload()
+        self.assertEqual(oc.resolve_url("/api/x"), "https://api.orcasecurity.io/api/x")
+
+    def test_repo_context_id_cannot_escape_its_path_segment(self):
+        oc = self._reload()
+        for bad in ("../../etc/passwd", "a/b", "a.b", "a:b", "a%2f", "", "x" * 200):
+            with self.assertRaises(oc.OrcaError, msg=bad):
+                oc.open_pull_request("orca-1", bad, {}, auth="Token t")
+
+    def test_repo_context_id_accepts_a_real_uuid(self):
+        oc = self._reload()
+        self.assertTrue(oc.PATH_SEGMENT_RE.match("019cd7cc-3a1f-753a-9aad-a19d9141f8b4"))
+
+
 class Logging(unittest.TestCase):
     """The bug this guards: INFO records were silently dropped in production.
 

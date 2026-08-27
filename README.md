@@ -21,6 +21,31 @@ for the Orca token if `ORCA_API_TOKEN` isn't already in your environment.
 The deploying account needs to enable APIs, create secrets, create a service
 account, and set IAM bindings — Editor plus Secret Manager Admin, or Owner.
 
+### Token role
+
+Assign the API token the **Editor** role. It is the narrowest built-in role that
+covers all three calls, because the flow needs two permissions that no other
+built-in role grants together:
+
+| Role | `ai_code_remediation.use` (step 2) | `repository_contexts.pull_requests` (step 3) |
+|---|---|---|
+| **Editor** | yes | yes |
+| Administrator | yes | yes — but far broader |
+| AI Agent | yes | **no** |
+| Shiftleft Administrator | **no** | yes |
+| Shiftleft Alert Manager | **no** | yes |
+
+The two shiftleft roles are the tempting wrong answer: they look purpose-built,
+generate nothing, and fail at step 2. A token with only half the pair produces the
+403s in [Troubleshooting a 403](#troubleshooting-a-403).
+
+If your tenant allows custom roles, eleven permissions are sufficient —
+`assets.asset.read`, `assets.query{,.read}`, `risks.alerts.read`,
+`risks.query{,.read}`, `platform.ai_features`,
+`platform.ai_code_remediation.use`, `shiftleft.repository_contexts{,.read}` and
+`shiftleft.repository_contexts.pull_requests` — against Editor's 170. Note that
+opening a pull request does **not** require `repository_contexts.write`.
+
 Then in Orca — **Settings → Connections → Integrations → Webhook → Create**:
 
 | Field | Value |

@@ -16,7 +16,9 @@ credentials in Secret Manager, creates the service account, deploys the function
 and prints the trigger URL and webhook secret. It prompts for the Orca token if
 `ORCA_API_TOKEN` isn't already in your environment.
 
-The deploying account needs Editor plus Secret Manager Admin, or Owner.
+The Google Cloud account running `deploy.sh` needs the GCP IAM roles
+`roles/editor` and `roles/secretmanager.admin`, or `roles/owner`. This is
+separate from the Orca role below.
 
 ### Create the Orca API token
 

@@ -1,0 +1,71 @@
+# SCA autofix: run the orca-patch Claude Code skill against recent shiftleft
+# alerts and open one pull request per alert. See "SCA autofix (Claude)" in
+# README.md. The Cloud Function handles SAST, IaC and CSPM; this covers what
+# Orca's AI code fix API cannot.
+name: Orca SCA autofix
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      alert_id:
+        description: "Run one alert (orca-XXXXX) instead of the last 26 hours"
+        required: false
+        default: ""
+      dry_run:
+        description: "List and dedupe only; do not run Claude"
+        type: boolean
+        required: false
+        default: false
+
+# One run at a time, so a slow scheduled run and a manual dispatch never race to
+# open the same pull request.
+concurrency:
+  group: orca-sca-autofix
+  cancel-in-progress: false
+
+# The default token only reads this repo. Everything that writes goes through
+# AUTOFIX_GH_PAT, an org-scoped fine-grained PAT with Contents and Pull requests.
+permissions:
+  contents: read
+
+jobs:
+  autofix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Let git and gh act as the autofix PAT in every repo of the org
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_GH_PAT }}
+        run: |
+          gh auth setup-git
+          git config --global user.name "orca-sca-autofix[bot]"
+          git config --global user.email "orca-sca-autofix@users.noreply.github.com"
+
+      - name: Patch alerts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ORCA_API_TOKEN: ${{ secrets.ORCA_API_TOKEN }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_GH_PAT }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          ALERT_ID: ${{ inputs.alert_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          if [ -n "$ALERT_ID" ]; then args+=(--alert-id "$ALERT_ID"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          python3 sca_autofix.py "${args[@]}"

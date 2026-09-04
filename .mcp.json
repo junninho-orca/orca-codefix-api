@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "orca-security": {
+      "type": "http",
+      "url": "https://api.orcasecurity.io/mcp",
+      "headers": {
+        "Authorization": "Token ${ORCA_API_TOKEN}"
+      }
+    }
+  }
+}

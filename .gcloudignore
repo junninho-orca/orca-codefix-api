@@ -1,8 +1,13 @@
 # The function needs only the three modules and requirements.txt.
 .git/
+.github/
+.claude/
 .gitignore
 .gcloudignore
+.mcp.json
 README.md
 deploy.sh
+sca_autofix.py
+test_sca_autofix.py
 __pycache__/
 *.pyc

@@ -133,10 +133,14 @@ permissions this workflow does not need. `.mcp.json` reads the token from the
 
 The workflow runs every 2 hours and picks up open SCA alerts created in the last
 26 hours, newest first, capped at 5 per run. Before running an alert it searches
-the org for an open PR on `orca-patch/<alert-id>` and skips the alert when one
-exists, so a still-open alert is not patched twice. Alerts run serially, and one
-failing does not fail the run: the job summary lists every alert with its outcome
-(PR URL, skipped, or the skill's report).
+the org for an open PR on `orca-patch/<alert-id>`, or an open PR whose body or
+comments name the alert, and skips the alert when one exists, so a still-open
+alert is not patched twice. Two alerts can share one fix surface (the same
+Dockerfile deployed to prod and UAT); when the skill finds an open `orca-patch/*`
+PR already touching the file, it comments the second alert id on that PR instead
+of opening another. Alerts run serially, and one failing does not fail the run:
+the job summary lists every alert with its outcome (PR URL, attached to an
+existing PR, skipped, or the skill's report).
 
 For one alert on demand, use **Actions -> Orca SCA autofix -> Run workflow** and
 fill in `alert_id`; the 26 hour window does not apply, only the open-PR check.

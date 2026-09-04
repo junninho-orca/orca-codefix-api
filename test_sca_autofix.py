@@ -208,6 +208,30 @@ class Reporting(unittest.TestCase):
         self.assertIn("orca-patch/orca-42", prompt)
         self.assertIn("/tmp/ws", prompt)
 
+    def test_prompt_asks_for_the_shared_fix_surface_check(self):
+        prompt = sca_autofix.build_prompt("orca-42", "/tmp/ws")
+        self.assertIn("orca-patch/* branch that touches the same file", prompt)
+        self.assertIn("PR: attached to <url>", prompt)
+
+    def test_repos_mentioned_from_urls_and_bare_names(self):
+        text = ("Origin: https://github.com/Acme/data-migration.git @ Dockerfile:3\n"
+                "Also see acme/other-repo/blob/main/x and https://github.com/acme/data-migration/pull/7\n"
+                "Not ours: https://github.com/someone-else/repo")
+        self.assertEqual(
+            sca_autofix.repos_mentioned(text, "acme"),
+            ["Acme/data-migration", "acme/other-repo"],
+        )
+
+    def test_repos_mentioned_ignores_branch_names_and_emails(self):
+        text = "branch orca-patch/orca-1 by dev@acme/nope acme/real-repo."
+        self.assertEqual(sca_autofix.repos_mentioned(text, "acme"), ["acme/real-repo"])
+
+    def test_attached_pr_reads_the_report_line(self):
+        text = "## orca-9: x\nPR: attached to https://github.com/acme/repo/pull/12\nNext: review"
+        self.assertEqual(sca_autofix.attached_pr(text), "https://github.com/acme/repo/pull/12")
+        self.assertIsNone(sca_autofix.attached_pr("PR: https://github.com/acme/repo/pull/12"))
+        self.assertIsNone(sca_autofix.attached_pr("PR: not opened: diff only"))
+
     def test_outcome_row_escapes_table_breaking_characters(self):
         row = sca_autofix.outcome_row("orca-1", "no_pr", "a | b\nc")
         self.assertEqual(row, "| orca-1 | no_pr | a / b c |")

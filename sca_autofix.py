@@ -263,7 +263,12 @@ def build_prompt(alert_id: str, workspace: str) -> str:
         "step is approved in advance, so after verifying the patch, commit it, "
         f"push it, and open the PR in this same run. Name the branch {branch_for(alert_id)} "
         f"(instead of the fix/ prefix). Clone the owning repository under {workspace}. "
-        "Never push to the default branch, never force-push, never merge. If any "
+        "Never push to the default branch, never force-push, never merge. Before "
+        "opening the PR, check the target repository for an open pull request on "
+        "another orca-patch/* branch that touches the same file (gh pr list --repo "
+        "<owner/repo> --state open --json url,headRefName,files); if one exists, do "
+        "not open a second PR: comment on that one with this alert id and its ui_url, "
+        f"and end your report with the line 'PR: attached to <url>'. If any "
         "stop condition applies, do not commit or push; finish with the skill's "
         "report block explaining why, and nothing else needs doing."
     )
@@ -292,6 +297,32 @@ def extract_report(text: str, alert_id: str, limit: int = 600) -> str:
     return snippet
 
 
+def repos_mentioned(text: str, owner: str) -> list[str]:
+    """`owner/repo` names in Claude's final message, in order of first mention.
+
+    The skill's report names the origin repository (as a github.com URL or a bare
+    owner/repo), which is where any PR it opened lives. Only repositories under
+    `owner` count, since the PAT and the dedupe are scoped to that org.
+    """
+    found: list[str] = []
+    pattern = re.compile(
+        r"(?:https?://github\.com/|(?<![\w./@-]))(" + re.escape(owner) + r"/[\w.-]+?)(?=[\s)\]>,:;'\"`]|\.git\b|/|$)",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(text):
+        repo = match.group(1).rstrip(".")
+        if repo.lower() not in (r.lower() for r in found):
+            found.append(repo)
+    return found
+
+
+def attached_pr(text: str) -> str | None:
+    """URL from the report's `PR: attached to <url>` line, when the skill chose to
+    comment on an existing PR for the same fix surface instead of opening one."""
+    match = re.search(r"PR:\s*attached to\s*(" + PR_URL_RE.pattern + ")", text, re.IGNORECASE)
+    return match.group(1) if match else None
+
+
 # --- Everything below has side effects: Orca, GitHub, Claude. ---------------
 
 
@@ -301,23 +332,54 @@ def fetch_alerts(alert_id: str | None, since: dt.datetime | None) -> list:
     return data if isinstance(data, list) else []
 
 
-def find_open_pr(owner: str, alert_id: str) -> str | None:
-    """URL of an open PR anywhere in `owner` whose head is this alert's branch."""
-    result = subprocess.run(
-        [
-            "gh", "search", "prs",
-            "--owner", owner,
-            "--state", "open",
-            "--head", branch_for(alert_id),
-            "--json", "url",
-            "--limit", "5",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+def _gh_json(args: list[str]) -> list:
+    result = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
     hits = json.loads(result.stdout or "[]")
+    return hits if isinstance(hits, list) else []
+
+
+def find_open_pr(owner: str, alert_id: str) -> str | None:
+    """URL of an open PR anywhere in `owner` whose head is this alert's branch.
+
+    Uses the search API, which can lag a fresh PR by a minute or two; fine for
+    the pre-run check, where anything that new was opened by this same run.
+    """
+    hits = _gh_json([
+        "search", "prs", "--owner", owner, "--state", "open",
+        "--head", branch_for(alert_id), "--json", "url", "--limit", "5",
+    ])
     return hits[0]["url"] if hits else None
+
+
+def find_pr_mentioning(owner: str, alert_id: str) -> str | None:
+    """URL of an open PR in `owner` whose body or comments name this alert.
+
+    Two alerts can share one fix surface (the same Dockerfile deployed to two
+    environments). The first run opens the PR; the second attaches its alert id
+    as a comment instead of opening another. This is what keeps the second alert
+    from being re-attached every two hours until Orca closes it.
+    """
+    hits = _gh_json([
+        "search", "prs", "--owner", owner, "--state", "open",
+        "--match", "body,comments", alert_id, "--json", "url", "--limit", "5",
+    ])
+    return hits[0]["url"] if hits else None
+
+
+def find_pr_in_repos(repos: list[str], alert_id: str) -> str | None:
+    """URL of the open PR on this alert's branch in any of `repos`.
+
+    `gh pr list --head` reads the repository directly, so unlike the search API
+    it sees a PR the moment it exists.
+    """
+    for repo in repos:
+        hits = _gh_json([
+            "pr", "list", "--repo", repo, "--state", "open",
+            "--head", branch_for(alert_id), "--json", "url", "--limit", "1",
+        ])
+        if hits:
+            return hits[0]["url"]
+    return None
 
 
 def run_claude(alert_id: str, workspace: str, repo_root: str) -> tuple[str, dict]:
@@ -362,10 +424,13 @@ def process(alert_id: str, owner: str, repo_root: str, dry_run: bool) -> tuple[s
     """
     try:
         existing = find_open_pr(owner, alert_id)
+        covering = None if existing else find_pr_mentioning(owner, alert_id)
     except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError) as exc:
         return "error", f"PR lookup failed: {exc}"
     if existing:
         return "skipped", f"open PR exists: {existing}"
+    if covering:
+        return "skipped", f"already covered by an open PR: {covering}"
     if dry_run:
         return "dry-run", "would run orca-patch"
 
@@ -379,19 +444,25 @@ def process(alert_id: str, owner: str, repo_root: str, dry_run: bool) -> tuple[s
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
-    # The PR search is the ground truth; the text is only a fallback for the URL.
-    try:
-        opened = find_open_pr(owner, alert_id)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
-        opened = None
-    if opened is None:
-        match = PR_URL_RE.search(text)
-        opened = match.group(0) if match else None
-
     cost = envelope.get("total_cost_usd") if isinstance(envelope, dict) else None
     cost_note = f" (${cost:.2f})" if isinstance(cost, (int, float)) else ""
+
+    # GitHub is the ground truth. Read the repository the report names first,
+    # since that is exact and instant; the search index can lag a fresh PR.
+    try:
+        opened = find_pr_in_repos(repos_mentioned(text, owner), alert_id) or find_open_pr(owner, alert_id)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
+        opened = None
     if opened:
         return "pr_opened", f"{opened}{cost_note}"
+
+    attached = attached_pr(text)
+    if attached:
+        return "attached", f"commented on the existing PR for the same fix surface: {attached}{cost_note}"
+
+    match = PR_URL_RE.search(text)
+    if match:
+        return "pr_opened", f"{match.group(0)}{cost_note}"
     return "no_pr", extract_report(text, alert_id) + cost_note
 
 
